@@ -21,3 +21,6 @@ target_link_libraries(rtsp_module PRIVATE ${OpenCV_LIBS})
 
 # Compiler-specific options for pybind11
 target_compile_definitions(rtsp_module PRIVATE VERSION_INFO=${EXAMPLE_VERSION_INFO})
+add_library(rtsp_module MODULE rtsp_module.cpp)
+target_link_libraries(rtsp_module PRIVATE pybind11::module ${OpenCV_LIBS})
+set_target_properties(rtsp_module PROPERTIES PREFIX "" SUFFIX ".so")

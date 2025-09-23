@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-RTSP Stream Reader using the custom C++ module
-This script demonstrates how to use the rtsp_module to read frames from RTSP streams.
-"""
 
 import sys
 import cv2
@@ -143,10 +139,9 @@ def main():
     # Example RTSP URLs (replace with your actual RTSP stream)
     # Common test RTSP streams:
     rtsp_urls = [
-        "rtsp://your-camera-ip:554/stream1",  # Replace with your camera IP
-        "rtsp://admin:password@192.168.1.100:554/stream1",  # With authentication
-        # Test stream (if available):
-        "rtsp://wowzaec2demo.streamlock.net/vod-multitrack/_definst_/ElephantsDream/elephantsdream2.stream"
+        "rtsp://admin:admin1234@192.168.0.3:554/cam/realmonitor?channel=1&subtype=0",
+        "rtsp://admin:admin1234@192.168.0.4:554/cam/realmonitor?channel=1&subtype=0",
+        "rtsp://admin:admin1234@192.168.0.5:554/cam/realmonitor?channel=1&subtype=0"
     ]
     
     # Use the first URL for this example
