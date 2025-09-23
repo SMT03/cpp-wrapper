@@ -1,0 +1,3 @@
+/home/nay/Documents/cpp-wrapper/build/CMakeFiles/rtsp_module.dir
+/home/nay/Documents/cpp-wrapper/build/CMakeFiles/edit_cache.dir
+/home/nay/Documents/cpp-wrapper/build/CMakeFiles/rebuild_cache.dir
