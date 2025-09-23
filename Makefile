@@ -1,10 +1,11 @@
 CXX = g++
 CXXFLAGS = -O3 -Wall -shared -std=c++14 -fPIC
-PYTHON_INCLUDES = $(shell python3 -m pybind11 --includes)
+PYTHON_VERSION = python3.12
+PYTHON_INCLUDES = $(shell $(PYTHON_VERSION) -m pybind11 --includes)
 OPENCV_LIBS = $(shell pkg-config --libs opencv4)
 OPENCV_CFLAGS = $(shell pkg-config --cflags opencv4)
 
-TARGET = rtsp_module$(shell python3-config --extension-suffix)
+TARGET = rtsp_module$(shell $(PYTHON_VERSION)-config --extension-suffix)
 SOURCE = rtsp_module.cpp
 
 all: $(TARGET)
