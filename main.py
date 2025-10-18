@@ -114,12 +114,9 @@ def save_frame(frame: np.ndarray, filename: str) -> bool:
         bool: True if saved successfully, False otherwise
     """
     try:
-        # Convert BGR to RGB if needed (OpenCV uses BGR by default)
-        if len(frame.shape) == 3 and frame.shape[2] == 3:
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            success = cv2.imwrite(filename, frame_rgb)
-        else:
-            success = cv2.imwrite(filename, frame)
+        # OpenCV imwrite expects BGR ordering for color images
+        # The frames coming from the module are BGR; write them directly.
+        success = cv2.imwrite(filename, frame)
         
         if success:
             print(f"Frame saved as: {filename}")

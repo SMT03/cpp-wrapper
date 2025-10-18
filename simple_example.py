@@ -49,7 +49,7 @@ def simple_rtsp_example():
             print(f"  Frame shape: {frame.shape}")
             print(f"  Frame dtype: {frame.dtype}")
             
-            # Save frame as image
+            # Save frame as image (frame is BGR as returned by the module)
             filename = f"frame_{i+1:03d}.jpg"
             cv2.imwrite(filename, frame)
             print(f"  Saved: {filename}")
