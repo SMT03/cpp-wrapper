@@ -1,8 +1,0 @@
-[
-{
-  "directory": "/home/nay/Documents/cpp-wrapper/build",
-  "command": "/usr/bin/g++ -DVERSION_INFO=\"\" -Drtsp_module_EXPORTS -isystem /usr/include/opencv4 -isystem /usr/include/python3.12 -O3 -DNDEBUG -std=gnu++14 -fPIC -fvisibility=hidden -flto -fno-fat-lto-objects -o CMakeFiles/rtsp_module.dir/rtsp_module.cpp.o -c /home/nay/Documents/cpp-wrapper/rtsp_module.cpp",
-  "file": "/home/nay/Documents/cpp-wrapper/rtsp_module.cpp",
-  "output": "CMakeFiles/rtsp_module.dir/rtsp_module.cpp.o"
-}
-]

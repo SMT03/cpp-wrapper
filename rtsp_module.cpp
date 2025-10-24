@@ -3,34 +3,49 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>  // For color conversions
 #include <stdexcept>  // For error handling
+#include <iostream>
 
-#ifdef HAVE_FFMPEG
+// FFmpeg libraries for RTSP decoding with rkmpp hardware acceleration
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/hwcontext.h>
+#include <libavutil/hwcontext_drm.h>
 #include <libswscale/swscale.h>
-#endif
+
+// RGA for hardware color conversion (Rockchip)
+extern "C" {
+#include <rga/rga.h>
+#include <rga/im2d.h>
+}
 
 namespace py = pybind11;
 
-// A thin abstraction: when FFmpeg is available (HAVE_FFMPEG), use it to decode
-// RTSP frames (with the possibility to extend to rkmpp/RGA). Otherwise, fall
-// back to OpenCV VideoCapture for simplicity.
-
-#ifdef HAVE_FFMPEG
-// Minimal FFmpeg-based reader. This is a conservative, portable implementation
-// that decodes packets into AVFrame and converts to BGR8 cv::Mat using sws.
+// RTSPReader using jellyfin-ffmpeg with rkmpp hardware decoding and RGA conversion
 class RTSPReader {
 public:
-    RTSPReader(const std::string& url) : fmt_ctx(nullptr), codec_ctx(nullptr), sws_ctx(nullptr), video_stream_index(-1) {
+    RTSPReader(const std::string& url) : fmt_ctx(nullptr), codec_ctx(nullptr), hw_device_ctx(nullptr), 
+                                          sws_ctx(nullptr), video_stream_index(-1), use_rga(true) {
         avformat_network_init();
-        if (avformat_open_input(&fmt_ctx, url.c_str(), nullptr, nullptr) != 0) {
+        
+        // Open RTSP stream with minimal buffering (1 frame)
+        AVDictionary* opts = nullptr;
+        av_dict_set(&opts, "rtsp_transport", "tcp", 0);
+        av_dict_set(&opts, "buffer_size", "1", 0);  // 1 frame buffer
+        av_dict_set(&opts, "max_delay", "0", 0);     // Minimal delay
+        av_dict_set(&opts, "reorder_queue_size", "1", 0);  // Reorder queue size
+        
+        if (avformat_open_input(&fmt_ctx, url.c_str(), nullptr, &opts) != 0) {
+            av_dict_free(&opts);
             throw std::runtime_error("Failed to open RTSP stream: " + url);
         }
+        av_dict_free(&opts);
+        
         if (avformat_find_stream_info(fmt_ctx, nullptr) < 0) {
             cleanup();
             throw std::runtime_error("Failed to find stream info");
         }
 
+        // Find video stream
         for (unsigned i = 0; i < fmt_ctx->nb_streams; ++i) {
             if (fmt_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
                 video_stream_index = i;
@@ -43,7 +58,29 @@ public:
         }
 
         AVCodecParameters* codecpar = fmt_ctx->streams[video_stream_index]->codecpar;
-        const AVCodec* codec = avcodec_find_decoder(codecpar->codec_id);
+        
+        // Try to find rkmpp decoder first
+        const AVCodec* codec = nullptr;
+        if (codecpar->codec_id == AV_CODEC_ID_H264) {
+            codec = avcodec_find_decoder_by_name("h264_rkmpp");
+            if (!codec) {
+                std::cerr << "Warning: h264_rkmpp not found, trying h264_rkmpp_decoder" << std::endl;
+                codec = avcodec_find_decoder_by_name("h264_rkmpp_decoder");
+            }
+        } else if (codecpar->codec_id == AV_CODEC_ID_HEVC) {
+            codec = avcodec_find_decoder_by_name("hevc_rkmpp");
+            if (!codec) {
+                codec = avcodec_find_decoder_by_name("hevc_rkmpp_decoder");
+            }
+        }
+        
+        // Fallback to default decoder if rkmpp not available
+        if (!codec) {
+            std::cerr << "Warning: rkmpp decoder not found, using software decoder" << std::endl;
+            codec = avcodec_find_decoder(codecpar->codec_id);
+            use_rga = false; // Can't use RGA without hardware frames
+        }
+        
         if (!codec) {
             cleanup();
             throw std::runtime_error("Unsupported codec");
@@ -54,9 +91,22 @@ public:
             cleanup();
             throw std::runtime_error("Failed to allocate codec context");
         }
+        
         if (avcodec_parameters_to_context(codec_ctx, codecpar) < 0) {
             cleanup();
             throw std::runtime_error("Failed to copy codec parameters");
+        }
+
+        // Enable hardware decoding if using rkmpp
+        if (use_rga) {
+            // Set hardware device type (DRM for rkmpp)
+            if (av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_DRM, nullptr, nullptr, 0) < 0) {
+                std::cerr << "Warning: Failed to create DRM device context, falling back to software" << std::endl;
+                use_rga = false;
+            } else {
+                codec_ctx->hw_device_ctx = av_buffer_ref(hw_device_ctx);
+                codec_ctx->get_format = get_hw_format;
+            }
         }
 
         if (avcodec_open2(codec_ctx, codec, nullptr) < 0) {
@@ -66,6 +116,20 @@ public:
 
         pkt = av_packet_alloc();
         frame = av_frame_alloc();
+        hw_frame = av_frame_alloc();
+        
+        std::cout << "RTSPReader initialized with " 
+                  << (use_rga ? "rkmpp hardware decoding" : "software decoding") << std::endl;
+    }
+    
+    static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts) {
+        const enum AVPixelFormat *p;
+        for (p = pix_fmts; *p != AV_PIX_FMT_NONE; p++) {
+            if (*p == AV_PIX_FMT_DRM_PRIME) {
+                return *p;
+            }
+        }
+        return AV_PIX_FMT_NONE;
     }
 
     ~RTSPReader() {
@@ -81,31 +145,60 @@ public:
                     av_packet_unref(pkt);
                     continue;
                 }
+                
                 ret = avcodec_receive_frame(codec_ctx, frame);
                 av_packet_unref(pkt);
+                
                 if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                     continue;
                 } else if (ret < 0) {
                     throw std::runtime_error("Error decoding frame");
                 }
 
-                // Convert AVFrame to BGR cv::Mat
-                int width = frame->width;
-                int height = frame->height;
-                int src_format = frame->format;
-                // Setup sws context for conversion to BGR24
-                SwsContext* local_sws = sws_getContext(width, height, (AVPixelFormat)src_format,
-                                                      width, height, AV_PIX_FMT_BGR24,
-                                                      SWS_BILINEAR, nullptr, nullptr, nullptr);
+                AVFrame* src_frame = frame;
+                
+                // If using hardware decoding, transfer from GPU to CPU if needed
+                if (use_rga && frame->format == AV_PIX_FMT_DRM_PRIME) {
+                    if (av_hwframe_transfer_data(hw_frame, frame, 0) < 0) {
+                        std::cerr << "Warning: Failed to transfer hwframe, falling back to software" << std::endl;
+                        use_rga = false;
+                        continue;
+                    }
+                    src_frame = hw_frame;
+                }
+
+                // Convert to BGR
+                int width = src_frame->width;
+                int height = src_frame->height;
+                int src_format = src_frame->format;
+                
+                cv::Mat out_mat(height, width, CV_8UC3);
+                
+                // Try RGA conversion if available (much faster on RK3588)
+                if (use_rga && src_format == AV_PIX_FMT_NV12) {
+                    if (convert_with_rga(src_frame, out_mat)) {
+                        return out_mat;
+                    } else {
+                        std::cerr << "RGA conversion failed, falling back to swscale" << std::endl;
+                        use_rga = false;
+                    }
+                }
+                
+                // Fallback to software swscale conversion
+                SwsContext* local_sws = sws_getContext(
+                    width, height, (AVPixelFormat)src_format,
+                    width, height, AV_PIX_FMT_BGR24,
+                    SWS_BILINEAR, nullptr, nullptr, nullptr
+                );
+                
                 if (!local_sws) {
                     throw std::runtime_error("Failed to create sws context");
                 }
 
-                cv::Mat out_mat(height, width, CV_8UC3);
                 uint8_t* dest[4] = { out_mat.data, nullptr, nullptr, nullptr };
                 int dest_linesize[4] = { static_cast<int>(out_mat.step[0]), 0, 0, 0 };
 
-                sws_scale(local_sws, frame->data, frame->linesize, 0, height, dest, dest_linesize);
+                sws_scale(local_sws, src_frame->data, src_frame->linesize, 0, height, dest, dest_linesize);
                 sws_freeContext(local_sws);
 
                 return out_mat;
@@ -117,62 +210,57 @@ public:
     }
 
     void release() {
-        // Nothing special: destructor frees resources
+        // Destructor handles cleanup
     }
 
 private:
     AVFormatContext* fmt_ctx;
     AVCodecContext* codec_ctx;
+    AVBufferRef* hw_device_ctx;
     AVPacket* pkt;
     AVFrame* frame;
+    AVFrame* hw_frame;
     SwsContext* sws_ctx;
     int video_stream_index;
+    bool use_rga;
+    
+    bool convert_with_rga(AVFrame* src_frame, cv::Mat& dst) {
+        // RGA conversion from NV12 to BGR using im2d API
+        rga_buffer_t src_buf, dst_buf;
+        memset(&src_buf, 0, sizeof(src_buf));
+        memset(&dst_buf, 0, sizeof(dst_buf));
+        
+        // Setup source buffer (NV12)
+        src_buf.width = src_frame->width;
+        src_buf.height = src_frame->height;
+        src_buf.format = RK_FORMAT_YCbCr_420_SP; // NV12
+        src_buf.vir_addr = (void*)src_frame->data[0];
+        
+        // Setup destination buffer (BGR)
+        dst_buf.width = dst.cols;
+        dst_buf.height = dst.rows;
+        dst_buf.format = RK_FORMAT_BGR_888;
+        dst_buf.vir_addr = (void*)dst.data;
+        
+        // Perform conversion
+        im_rect src_rect = {0, 0, src_frame->width, src_frame->height};
+        im_rect dst_rect = {0, 0, dst.cols, dst.rows};
+        
+        int ret = imcvtcolor(src_buf, dst_buf, src_rect, dst_rect, IM_COLOR_SPACE_DEFAULT);
+        
+        return ret == IM_STATUS_SUCCESS;
+    }
 
     void cleanup() {
         if (pkt) { av_packet_free(&pkt); pkt = nullptr; }
         if (frame) { av_frame_free(&frame); frame = nullptr; }
+        if (hw_frame) { av_frame_free(&hw_frame); hw_frame = nullptr; }
         if (codec_ctx) { avcodec_free_context(&codec_ctx); codec_ctx = nullptr; }
         if (fmt_ctx) { avformat_close_input(&fmt_ctx); fmt_ctx = nullptr; }
+        if (hw_device_ctx) { av_buffer_unref(&hw_device_ctx); hw_device_ctx = nullptr; }
         avformat_network_deinit();
     }
 };
-#else
-// Fallback to OpenCV's VideoCapture
-#include <opencv2/videoio.hpp>
-class RTSPReader {
-public:
-    RTSPReader(const std::string& url) {
-        if (!cap.open(url)) {
-            throw std::runtime_error("Failed to open RTSP stream: " + url);
-        }
-    }
-
-    cv::Mat read() {
-        cv::Mat frame;
-        if (!cap.read(frame)) {
-            throw std::runtime_error("Failed to read frame from RTSP stream");
-        }
-        if (frame.empty()) {
-            throw std::runtime_error("Received empty frame");
-        }
-        if (frame.type() != CV_8UC3 && frame.type() != CV_8UC1) {
-            // Convert to 3-channel BGR for consistency
-            cv::Mat conv;
-            frame.convertTo(conv, CV_8U);
-            if (conv.channels() == 1) cv::cvtColor(conv, conv, cv::COLOR_GRAY2BGR);
-            return conv;
-        }
-        return frame;
-    }
-
-    void release() {
-        cap.release();
-    }
-
-private:
-    cv::VideoCapture cap;
-};
-#endif
 
 // Expose to Python
 PYBIND11_MODULE(rtsp_module, m) {
@@ -216,4 +304,3 @@ PYBIND11_MODULE(rtsp_module, m) {
                 return py::buffer_info(mat.data, elem_size, format, 3, shape, strides);
             }
         });
-}
